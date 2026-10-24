@@ -385,7 +385,8 @@
         "compactedBody": "約 {before} → {after} トークン。古いメッセージは要約され、最近のメッセージはそのまま残っています。",
         "compactNothingTitle": "まだ圧縮するものはありません",
         "compactNothingBody": "会話はまだ短いため、すべてそのまま保持できます。",
-        "compactFailedTitle": "圧縮に失敗しました"
+        "compactFailedTitle": "圧縮に失敗しました",
+        "compactTrimmedBody": "チャットがモデルに収まらず要約もできなかったため、古いメッセージを外しました。モデルにも伝えています。最初からやり直すには新しいチャットを始めてください。"
       }
     },
     "quickStart": {

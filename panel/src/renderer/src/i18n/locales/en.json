@@ -385,7 +385,8 @@
         "compactedBody": "About {before} → {after} tokens. Older messages were summarized; recent ones are kept as they are.",
         "compactNothingTitle": "Nothing to compact yet",
         "compactNothingBody": "The conversation is still short enough to keep in full.",
-        "compactFailedTitle": "Compaction failed"
+        "compactFailedTitle": "Compaction failed",
+        "compactTrimmedBody": "The chat no longer fit the model, and a summary couldn't be made, so the oldest messages were left out. The model was told. For a clean slate, start a new chat."
       }
     },
     "quickStart": {

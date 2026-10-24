@@ -385,7 +385,8 @@
         "compactedBody": "约 {before} → {after} 个 token。较早的消息已被总结，最近的消息保持原样。",
         "compactNothingTitle": "暂时无需压缩",
         "compactNothingBody": "对话仍然足够短，可以完整保留。",
-        "compactFailedTitle": "压缩失败"
+        "compactFailedTitle": "压缩失败",
+        "compactTrimmedBody": "对话已超出模型的上下文，且无法生成摘要，因此省略了最早的消息，并已告知模型。如需从头开始，请新建对话。"
       }
     },
     "quickStart": {

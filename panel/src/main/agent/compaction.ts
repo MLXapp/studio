@@ -227,8 +227,22 @@ const IMAGE_TOKENS = 768
 const VIDEO_TOKENS = 4096
 const AUDIO_TOKENS = 1024
 
+/**
+ * Chinese, Japanese and Korean run about one token per character (often more),
+ * not 3.5 characters per token: counted separately so a CJK chat is not
+ * underestimated threefold.
+ */
+function isCjk(code: number): boolean {
+  return (code >= 0x3040 && code <= 0x30ff) || (code >= 0x3400 && code <= 0x4dbf) ||
+    (code >= 0x4e00 && code <= 0x9fff) || (code >= 0xac00 && code <= 0xd7af) ||
+    (code >= 0xf900 && code <= 0xfaff) || (code >= 0xff00 && code <= 0xffef)
+}
+
 function textTokens(text: string): number {
-  return Math.ceil(text.length / CHARS_PER_TOKEN)
+  if (!text) return 0
+  let cjk = 0
+  for (let i = 0; i < text.length; i += 1) if (isCjk(text.charCodeAt(i))) cjk += 1
+  return Math.ceil((text.length - cjk) / CHARS_PER_TOKEN + cjk)
 }
 
 function contentTokens(content: unknown): number {
@@ -301,20 +315,75 @@ export function estimateRequestTokens(messages: readonly unknown[], tools?: read
  * last pass that reported usage. It never drops below half the heuristic.
  */
 export class TokenCalibrator {
-  private offset = 0
+  private first: { h: number; m: number } | null = null
+  private last: { h: number; m: number } | null = null
 
   observe(heuristicTokens: number, measuredPromptTokens: number): void {
     if (!(heuristicTokens > 0) || !(measuredPromptTokens > 0)) return
-    this.offset = Math.round(measuredPromptTokens - heuristicTokens)
+    const point = { h: heuristicTokens, m: measuredPromptTokens }
+    this.first ??= point
+    this.last = point
+  }
+
+  /**
+   * measured ≈ overhead + density × heuristic. One observation gives the
+   * overhead alone (density 1); two far enough apart also give the density, so
+   * a chat whose text tokenizes denser than the heuristic (code, JSON, other
+   * scripts) is not underestimated more and more as it grows, while a short
+   * chat with large tool schemas is not overestimated.
+   */
+  private fit(): { overhead: number; density: number } {
+    const { first, last } = this
+    if (!last) return { overhead: 0, density: 1 }
+    if (first && last.h - first.h >= Math.max(2000, last.h * 0.2)) {
+      const density = Math.min(4, Math.max(0.5, (last.m - first.m) / (last.h - first.h)))
+      return { overhead: last.m - density * last.h, density }
+    }
+    return { overhead: last.m - last.h, density: 1 }
   }
 
   estimate(heuristicTokens: number): number {
-    return Math.max(Math.ceil(heuristicTokens * 0.5), Math.ceil(heuristicTokens + this.offset))
+    const { overhead, density } = this.fit()
+    return Math.max(Math.ceil(heuristicTokens * 0.5), Math.ceil(overhead + density * heuristicTokens))
+  }
+
+  /** Real tokens per heuristic token at this size. */
+  scale(heuristicTokens: number): number {
+    return heuristicTokens > 0 ? this.estimate(heuristicTokens) / heuristicTokens : this.fit().density
   }
 
   get correction(): number {
-    return this.offset
+    return this.last ? Math.round(this.last.m - this.last.h) : 0
   }
+}
+
+/**
+ * The token counts in a "prompt too long" rejection, when it states them:
+ * vMLX ("has 274320 tokens, max prompt/context tokens is 262144"), OpenAI
+ * ("maximum context length is 128000 tokens. However, your messages resulted
+ * in 130512 tokens"), Anthropic ("prompt is too long: 210000 tokens > 200000
+ * maximum") and llama.cpp-style ("(4500 tokens) exceeds the available context
+ * size (4096 tokens)").
+ */
+export function parseOverflowTokens(detail: string): { promptTokens?: number; maxTokens?: number } {
+  const text = String(detail || '').replace(/,(?=\d{3})/g, '')
+  const num = (re: RegExp) => {
+    const m = text.match(re)
+    const v = m ? Number(m[1]) : NaN
+    return Number.isFinite(v) && v > 0 ? v : undefined
+  }
+  const promptTokens =
+    num(/has (\d+) tokens/i) ??
+    num(/resulted in (\d+) tokens/i) ??
+    num(/too long:\s*(\d+) tokens/i) ??
+    num(/\((\d+) tokens\) exceeds/i) ??
+    num(/(\d+) (?:input |prompt )?tokens? (?:>|exceeds)/i)
+  const maxTokens =
+    num(/max(?:imum)? (?:prompt\/context |prompt |context )?(?:length |tokens )?(?:is |of )?(\d+)/i) ??
+    num(/>\s*(\d+) maximum/i) ??
+    num(/context size \((\d+) tokens\)/i) ??
+    num(/limit (?:is |of )?(\d+)/i)
+  return { ...(promptTokens ? { promptTokens } : {}), ...(maxTokens ? { maxTokens } : {}) }
 }
 
 // ─── Context window ──────────────────────────────────────────────────────────
@@ -476,6 +545,7 @@ export function selectCompactionRange(
   messages: readonly unknown[],
   retainTokens: number,
   estimate: (message: unknown) => number = estimateMessageTokens,
+  maxSpanTokens = Infinity,
 ): CompactionRange | null {
   const start = firstCompactableIndex(messages)
   if (messages.length - start < 2) return null
@@ -487,12 +557,35 @@ export function selectCompactionRange(
     keepFrom = index
     if (accumulated >= retainTokens) break
   }
+  // The span is replayed to the model to be summarized, so it must fit in one
+  // request: when it would not, summarize the oldest part that fits now and
+  // the rest in a following round (the next span starts with this checkpoint).
+  if (Number.isFinite(maxSpanTokens)) {
+    let span = 0
+    for (let index = start; index < keepFrom; index += 1) {
+      span += estimate(messages[index])
+      if (span > maxSpanTokens) {
+        keepFrom = Math.max(start + 1, index)
+        break
+      }
+    }
+  }
   while (keepFrom > start && !isBalancedCut(messages, keepFrom)) keepFrom -= 1
   if (keepFrom <= start) return null
 
   const end = keepFrom - 1
   if (end === start && isCheckpointMessage(messages[start])) return null
   return { start, end }
+}
+
+/**
+ * The checkpoint used when a summary cannot be made (the model failed or ran
+ * out of room) and the chat would otherwise not fit at all: the older span is
+ * dropped, and the model is told so, instead of the message not being sent.
+ */
+export function trimmedCheckpointSummary(droppedMessages: number, previousSummary?: string): string {
+  const note = `## Critical Context\n- ${droppedMessages} earlier message${droppedMessages === 1 ? ' was' : 's were'} removed to fit the model's context window, without a summary. If something from earlier is needed, ask the user.`
+  return previousSummary ? `${previousSummary.trim()}\n\n${note}` : note
 }
 
 /**

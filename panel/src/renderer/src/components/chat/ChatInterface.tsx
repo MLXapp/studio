@@ -574,7 +574,9 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
     // Automatic context compaction finished (or failed) during a turn.
     const handleCompaction = (data: any) => {
       if (data.chatId !== chatId || !isCurrentChat()) return
-      if (data.phase === 'done') {
+      if (data.phase === 'done' && data.trimmed) {
+        showToast('info', t('chat.interface.toast.compactedTitle'), t('chat.interface.toast.compactTrimmedBody'))
+      } else if (data.phase === 'done') {
         showToast('info', t('chat.interface.toast.compactedTitle'), t('chat.interface.toast.compactedBody', {
           before: Number(data.beforeTokens || 0).toLocaleString(),
           after: Number(data.afterTokens || 0).toLocaleString(),

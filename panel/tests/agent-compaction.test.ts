@@ -23,6 +23,8 @@ import {
   messagesAfterCompaction,
   missingSummarySections,
   parseCompactionState,
+  parseOverflowTokens,
+  trimmedCheckpointSummary,
   persistedBoundaryForRange,
   resolveContextWindow,
   selectCompactionRange,
@@ -259,5 +261,58 @@ describe('summary stream parsing', () => {
     expect(cleanSummaryText('```markdown\n## Next Step\n- go\n```')).toBe('## Next Step\n- go')
     expect(cleanSummaryText(`${CHECKPOINT_PREAMBLE}\n${SUMMARY_OPEN_TAG}\n## A\n</compacted-summary>`)).toBe('## A')
     expect(cleanSummaryText('## A\n<think>never closed')).toBe('## A')
+  })
+})
+
+
+describe('long chats that outgrow the window (prompt_too_long)', () => {
+  it('reads the real counts from the rejection', () => {
+    expect(parseOverflowTokens('prompt_too_long: text prompt (tokenized) has 274320 tokens, max prompt/context tokens is 262144'))
+      .toEqual({ promptTokens: 274320, maxTokens: 262144 })
+    expect(parseOverflowTokens("This model's maximum context length is 128000 tokens. However, your messages resulted in 130,512 tokens."))
+      .toEqual({ promptTokens: 130512, maxTokens: 128000 })
+    expect(parseOverflowTokens('prompt is too long: 210000 tokens > 200000 maximum'))
+      .toEqual({ promptTokens: 210000, maxTokens: 200000 })
+    expect(parseOverflowTokens('the request exceeds the available context size (4096 tokens), try increasing it')).toEqual({ maxTokens: 4096 })
+    expect(parseOverflowTokens('something else')).toEqual({})
+  })
+
+  it('counts Chinese, Japanese and Korean at about a token per character', () => {
+    const en = estimateMessageTokens({ role: 'user', content: 'a'.repeat(3500) })
+    const zh = estimateMessageTokens({ role: 'user', content: '你'.repeat(3500) })
+    const ko = estimateMessageTokens({ role: 'user', content: '한'.repeat(1000) })
+    expect(en).toBeLessThan(1100)
+    expect(zh).toBeGreaterThanOrEqual(3500)
+    expect(ko).toBeGreaterThanOrEqual(1000)
+  })
+
+  it('learns density from two passes, so a growing chat is not underestimated', () => {
+    const c = new TokenCalibrator()
+    c.observe(20_000, 40_000)
+    c.observe(100_000, 200_000) // tokenizes twice as dense as the heuristic
+    expect(c.estimate(130_000)).toBe(260_000)
+    expect(c.scale(130_000)).toBeCloseTo(2)
+    // A short chat with large tool schemas: the overhead stays fixed.
+    const t = new TokenCalibrator()
+    t.observe(1_000, 9_000)
+    t.observe(5_000, 13_000)
+    expect(t.estimate(50_000)).toBe(58_000)
+  })
+
+  it('summarizes only as much as fits in one request, the rest in the next round', () => {
+    const msgs = [
+      { role: 'system', content: 's' },
+      ...Array.from({ length: 10 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: 'x'.repeat(350) })),
+    ]
+    const every = selectCompactionRange(msgs, 200)
+    expect(every).toEqual({ start: 1, end: 8 })
+    const capped = selectCompactionRange(msgs, 200, estimateMessageTokens, 350)
+    expect(capped!.start).toBe(1)
+    expect(capped!.end).toBeLessThan(4)
+  })
+
+  it('says what was dropped when no summary could be made', () => {
+    expect(trimmedCheckpointSummary(12)).toContain('12 earlier messages were removed')
+    expect(trimmedCheckpointSummary(1, '## Current Work\n- x')).toMatch(/^## Current Work[\s\S]*1 earlier message was removed/)
   })
 })

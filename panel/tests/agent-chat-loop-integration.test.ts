@@ -298,6 +298,55 @@ describe('automatic compaction in the chat loop', () => {
   })
 })
 
+describe('a chat far past the window (prompt_too_long with real counts)', () => {
+  // One scripted engine for every request of the turn: summaries are answered
+  // by `summary`, the first real request is rejected with the engine's exact
+  // wording, later real requests answer.
+  const engine = (summary: (body: any) => Reply) => {
+    let rejected = false
+    return Array.from({ length: 12 }, () => (body: any): Reply => {
+      if (isSummaryRequest(body)) return summary(body)
+      if (!rejected) {
+        rejected = true
+        return { kind: 'error', status: 400, message: 'prompt_too_long: text prompt (tokenized) has 350000 tokens, max prompt/context tokens is 131072' }
+      }
+      return { kind: 'text', text: 'Sent.' }
+    })
+  }
+  const heuristicTokens = (body: any) => Math.ceil(JSON.stringify(body.messages).length / 3.5)
+
+  it('summarizes in parts that each fit, without thinking, and sends the message', async () => {
+    h.state.maxPromptTokens = 0 // window from the model config (131k): no threshold trigger
+    seedHistory(30, 20_000) // ~350k tokens
+    replies = engine(() => ({ kind: 'text', text: SUMMARY }))
+    const result = await send('one more thing')
+    expect(result.content).toBe('Sent.')
+    const summaries = requests.filter(isSummaryRequest)
+    expect(summaries.length).toBeGreaterThanOrEqual(2)
+    for (const s of summaries) {
+      // Each summary request fits the window, and the model answers it directly.
+      expect(heuristicTokens(s)).toBeLessThan(131072)
+      expect(s.chat_template_kwargs?.enable_thinking).toBe(false)
+    }
+    const last = requests.at(-1)
+    expect(isSummaryRequest(last)).toBe(false)
+    expect(heuristicTokens(last)).toBeLessThan(131072 * 0.7)
+    expect(last.messages.at(-1).content).toBe('one more thing')
+  })
+
+  it('drops the oldest messages (and says so) when no summary can be made, instead of not sending', async () => {
+    h.state.maxPromptTokens = 0
+    seedHistory(30, 20_000)
+    replies = engine(() => ({ kind: 'text', text: '' }))
+    const result = await send('still there?')
+    expect(result.content).toBe('Sent.')
+    const last = requests.at(-1)
+    expect(last.messages[1].content).toContain('removed to fit the model\'s context window')
+    expect(heuristicTokens(last)).toBeLessThan(131072)
+    expect(h.state.events.some(([ch, d]) => ch === 'chat:compaction' && d.phase === 'done' && d.trimmed)).toBe(true)
+  })
+})
+
 describe('compaction inside a tool loop', () => {
   it('compacts between tool rounds and still persists every tool call of the turn', async () => {
     h.state.maxPromptTokens = 18000 // fits the full built-in catalog (memory, tasks, browser tools included)

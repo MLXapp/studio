@@ -385,7 +385,8 @@
         "compactedBody": "Unos {before} → {after} tokens. Los mensajes antiguos se resumieron; los recientes se mantienen tal cual.",
         "compactNothingTitle": "Todavía no hay nada que compactar",
         "compactNothingBody": "La conversación aún es lo bastante corta para conservarla completa.",
-        "compactFailedTitle": "No se pudo compactar"
+        "compactFailedTitle": "No se pudo compactar",
+        "compactTrimmedBody": "El chat ya no cabía en el modelo y no se pudo resumir, así que se omitieron los mensajes más antiguos. El modelo lo sabe. Para empezar de cero, abre un chat nuevo."
       }
     },
     "quickStart": {
